@@ -1,5 +1,6 @@
 ﻿print('Initialisation')
 import numpy as np
+import imageio
 import scipy as sp
 import scipy.misc as sm
 import scipy.sparse.linalg as ssl
@@ -7,14 +8,22 @@ import scipy.sparse.linalg as ssl
 # input/output
 DSM_filename = "buildingDSM.png"
 DTM_filename = "buildingDTM.png"
-building_mask_filename = "building_mask.png"
-water_mask_filename = "water_mask.png"
+# new mode: no masks
+building_mask_filename = "" #"building_mask.png"
+water_mask_filename = "" #"water_mask.png"
 
 # parameters
 l_water = 1.e9  # amount of smoothing in the water
 l_ground = 100  # amount of smoothing on the ground
+buffer = 10
+max_iter = 10
+max_error = 1e-1
 show_result = 1
 
+if show_result:
+    import matplotlib.pyplot as plt
+    import matplotlib.colors as pltc
+    from mpl_toolkits.axes_grid1 import make_axes_locatable
 
 # sparse column gradient matrix
 def Gcs(nl, nc):
@@ -65,7 +74,7 @@ def sparse_diag(v):
 
 def read_as_2D_float(filename):
     print('Reading %s' % filename)
-    data = sm.imread(filename)
+    data =  imageio.imread(filename)
     if len(data.shape) > 2:
         data = data[:, :, 0]  # take first channel for color image
     return data.astype(float)
@@ -86,9 +95,17 @@ def weighted_square(M, water_weight):
 DSM = read_as_2D_float(DSM_filename)
 
 DSM_vect = to_vect(DSM)
-building_mask = read_as_2D_float(building_mask_filename)/255
-water_mask = read_as_2D_float(water_mask_filename)/255
-ground_mask = 1-np.maximum(building_mask, water_mask)
+if building_mask_filename:
+    building_mask = read_as_2D_float(building_mask_filename)/255
+else:
+    building_mask = np.zeros(DSM.shape)
+
+if water_mask_filename:
+    water_mask = read_as_2D_float(water_mask_filename)/255
+else:
+    water_mask = np.zeros(DSM.shape)
+
+ground_mask = 1 - np.maximum(building_mask, water_mask)
 ground_mask_vect = to_vect(ground_mask)
 
 # water mask is used to weight gradients, defined on images with one less column/line
@@ -97,29 +114,43 @@ water_mask_c_vect = to_vect(water_mask_c)
 water_mask_l = water_mask[0:-1, :]
 water_mask_l_vect = to_vect(water_mask_l)
 
-# DSM attachment only on ground
-ground_mask_diag = sparse_diag(ground_mask_vect)
-
 # column/line gradient sparse matrices = regularity term
 grad_c = Gcs(DSM.shape[0], DSM.shape[1])
 grad_l = Gls(DSM.shape[0], DSM.shape[1])
 G = weighted_square(grad_c, water_mask_c_vect) + weighted_square(grad_l, water_mask_l_vect)
 
-# final system
-A = ground_mask_diag + G
-f = ground_mask_diag.dot(DSM_vect)
-u = ssl.spsolve(A, f)  # solves Au=f in the least squares sense
+prev_u = DSM_vect
+for i_iter in range(max_iter):
+    # DSM attachment only on ground
+    ground_mask_diag = sparse_diag(ground_mask_vect)
 
-# export result
-DTM = np.uint8(np.reshape(u, DSM.shape))
-print('Saving %s' % DTM_filename)
-sm.imsave(DTM_filename, DTM)
+    # final system
+    A = ground_mask_diag + G
+    f = ground_mask_diag.dot(DSM_vect)
+    u = ssl.spsolve(A, f)  # solves Au=f in the least squares sense
 
-if show_result:
-    import matplotlib.pyplot as plt
-    import matplotlib.colors as pltc
-    plt.subplot(121)
-    plt.imshow(DSM, norm=pltc.Normalize(vmin=0, vmax=255))
-    plt.subplot(122)
-    plt.imshow(DTM, norm=pltc.Normalize(vmin=0, vmax=255))
-    plt.show()
+    if i_iter == 0:
+        ground_mask_vect = DSM_vect < u
+    else:
+        ground_mask_vect = DSM_vect < (u+buffer)
+    error = np.sqrt(np.linalg.norm(u-prev_u)/u.shape[0])
+    print(error)
+    prev_u = u
+
+    # export result
+    DTM = np.uint8(np.reshape(u, DSM.shape))
+    ground_mask = np.uint8(np.reshape(255*ground_mask_vect, DSM.shape))
+    if error < max_error:
+        print('Saving %s' % DTM_filename)
+        imageio.imwrite(DTM_filename, DTM)
+        break
+
+    if show_result:
+        ax = plt.subplot()
+        im = ax.imshow(np.concatenate((DSM,DTM,ground_mask), 1), norm=pltc.Normalize(vmin=0, vmax=255))
+        # create an axes on the right side of ax. The width of cax will be 5%
+        # of ax and the padding between cax and ax will be fixed at 0.05 inch.
+        divider = make_axes_locatable(ax)
+        cax = divider.append_axes("right", size="5%", pad=0.05)
+        plt.colorbar(im, cax=cax)
+        plt.show()
